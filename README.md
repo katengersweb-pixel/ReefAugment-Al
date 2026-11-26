@@ -219,17 +219,19 @@ Create `backend/.env` (copy from `backend/.env.example`) and configure your prov
 
 | Variable | Required | Default / Example | Description |
 | --- | --- | --- | --- |
-| `DIFFUSION_PROVIDER` | Yes | `huggingface` | Hosted provider: `huggingface`, `replicate`, `stability`, or `custom` |
+| `DIFFUSION_PROVIDER` | Yes | `cloudflare` | Free-tier: `cloudflare`, `aihorde`; Paid/credits: `replicate`, `stability`, `huggingface`, `custom` |
 | `DIFFUSION_API_KEY` | Yes | *(your provider token)* | Secret API key/token for the selected provider |
-| `DIFFUSION_MODEL` | Optional | `stabilityai/stable-diffusion-xl-base-1.0` | SDXL model identifier (`stability-ai/sdxl` for Replicate, `stable-diffusion-xl-1024-v1-0` for Stability) |
+| `CLOUDFLARE_ACCOUNT_ID` | If `cloudflare` | *(your CF Account ID)* | Required when using Cloudflare Workers AI free tier |
+| `DIFFUSION_MODEL` | Optional | `@cf/stabilityai/stable-diffusion-xl-base-1.0` | SDXL model identifier (`AlbedoBase XL (SDXL)` for AI Horde, `stability-ai/sdxl` for Replicate, `stable-diffusion-xl-1024-v1-0` for Stability) |
 | `DIFFUSION_TIMEOUT_SECONDS` | Optional | `120` | Request timeout in seconds |
 | `DIFFUSION_API_BASE_URL` | Optional | *(empty)* | Custom endpoint URL (required when `DIFFUSION_PROVIDER=custom`) |
-| `DIFFUSION_IMG2IMG_URL` | Optional | *(empty)* | Dedicated endpoint URL for Image-to-Image (needed on `huggingface` if not using `replicate` or `stability`) |
+| `DIFFUSION_IMG2IMG_URL` | Optional | *(empty)* | Dedicated endpoint URL for Image-to-Image (needed on `huggingface` if not using `cloudflare`, `aihorde`, `replicate`, or `stability`) |
 
 **Provider Capability Notes:**
-- **`huggingface`**: Supports SDXL **Text-to-Image** out of the box via `router.huggingface.co/hf-inference/models/...`. For **Image-to-Image**, set `DIFFUSION_IMG2IMG_URL` to a dedicated inference endpoint or use `replicate` / `stability`.
-- **`replicate`**: Supports **both** SDXL Text-to-Image and Image-to-Image (`stability-ai/sdxl`) natively using one `DIFFUSION_API_KEY`.
-- **`stability`**: Supports **both** SDXL Text-to-Image and Image-to-Image (`stable-diffusion-xl-1024-v1-0`) natively.
+- **`cloudflare` (Free Tier — No Credit Card):** 10,000 free Neurons/day via Cloudflare Workers AI (`@cf/stabilityai/stable-diffusion-xl-base-1.0`); supports **both** Text-to-Image and Image-to-Image. Requires `CLOUDFLARE_ACCOUNT_ID` + `DIFFUSION_API_KEY`.
+- **`aihorde` (Free Community Cluster — No Credit Card):** Crowdsourced SDXL GPUs (`https://stablehorde.net`); supports **both** Text-to-Image and Image-to-Image. Register a free API key at `stablehorde.net/register` (or test at lower resolution with anonymous `0000000000`).
+- **`huggingface`**: Text-to-Image via `router.huggingface.co/hf-inference/models/...` (Inference Providers credits required for most models; Image-to-Image needs `DIFFUSION_IMG2IMG_URL`).
+- **`replicate` / `stability`**: Paid/credit-based hosted SDXL supporting **both** Text-to-Image and Image-to-Image natively.
 - **`custom`**: Calls your own hosted SDXL HTTP endpoint (`DIFFUSION_API_BASE_URL` / `DIFFUSION_IMG2IMG_URL`).
 
 If credentials are missing, `/api/generation/status` returns `configured: false` with setup guidance, and generation requests return HTTP `503` without fabricating fake images.

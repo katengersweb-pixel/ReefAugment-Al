@@ -70,6 +70,8 @@ def get_runtime_diffusion_settings() -> Dict[str, Any]:
     """Read active diffusion settings dynamically from env/config without leaking secrets."""
     provider = (os.getenv("DIFFUSION_PROVIDER") or config.DIFFUSION_PROVIDER or "huggingface").strip().lower()
     default_model_map = {
+        "cloudflare": "@cf/stabilityai/stable-diffusion-xl-base-1.0",
+        "aihorde": "AlbedoBase XL (SDXL)",
         "huggingface": "stabilityai/stable-diffusion-xl-base-1.0",
         "replicate": "stability-ai/sdxl",
         "stability": "stable-diffusion-xl-1024-v1-0",
@@ -84,6 +86,9 @@ def get_runtime_diffusion_settings() -> Dict[str, Any]:
         model = default_model_map.get(provider, "stabilityai/stable-diffusion-xl-base-1.0")
 
     api_key = config.get_diffusion_api_key(provider)
+    cloudflare_account_id = (
+        os.getenv("CLOUDFLARE_ACCOUNT_ID") or config.CLOUDFLARE_ACCOUNT_ID
+    ).strip()
     base_url = (os.getenv("DIFFUSION_API_BASE_URL") or config.DIFFUSION_API_BASE_URL).strip()
     img2img_url = (os.getenv("DIFFUSION_IMG2IMG_URL") or config.DIFFUSION_IMG2IMG_URL).strip()
     replicate_version = (
@@ -92,11 +97,13 @@ def get_runtime_diffusion_settings() -> Dict[str, Any]:
     timeout_s = float(os.getenv("DIFFUSION_TIMEOUT_SECONDS") or config.DIFFUSION_TIMEOUT_SECONDS)
 
     configured = bool(api_key)
+    if provider == "cloudflare" and not cloudflare_account_id:
+        configured = False
     if provider == "custom" and not (base_url or img2img_url):
         configured = False
 
-    supports_t2i = provider in {"huggingface", "replicate", "stability", "custom"}
-    if provider in {"replicate", "stability"}:
+    supports_t2i = provider in {"cloudflare", "aihorde", "huggingface", "replicate", "stability", "custom"}
+    if provider in {"cloudflare", "aihorde", "replicate", "stability"}:
         supports_i2i = True
     elif provider == "huggingface":
         supports_i2i = bool(img2img_url)
@@ -105,17 +112,26 @@ def get_runtime_diffusion_settings() -> Dict[str, Any]:
     else:
         supports_i2i = False
 
+    required_vars = ["DIFFUSION_PROVIDER", "DIFFUSION_API_KEY", "DIFFUSION_MODEL"]
+    if provider == "cloudflare":
+        required_vars.append("CLOUDFLARE_ACCOUNT_ID")
+
     if not api_key:
         message = (
             f"Diffusion API credentials are not configured for provider '{provider}'. "
-            "Set DIFFUSION_API_KEY (or provider-specific token) in backend/.env or backend environment variables."
+            "Set DIFFUSION_API_KEY in backend/.env or Render Environment Variables."
+        )
+    elif provider == "cloudflare" and not cloudflare_account_id:
+        message = (
+            "CLOUDFLARE_ACCOUNT_ID is required when DIFFUSION_PROVIDER='cloudflare'. "
+            "Add CLOUDFLARE_ACCOUNT_ID in backend/.env or Render Environment Variables."
         )
     elif provider == "custom" and not (base_url or img2img_url):
         message = "DIFFUSION_PROVIDER='custom' requires DIFFUSION_API_BASE_URL or DIFFUSION_IMG2IMG_URL."
     elif provider == "huggingface" and not img2img_url:
         message = (
             f"Provider '{provider}' ({model}) is ready for Text-to-Image. "
-            "For Image-to-Image, set DIFFUSION_IMG2IMG_URL to a Hugging Face Dedicated Endpoint or switch DIFFUSION_PROVIDER to 'replicate' or 'stability'."
+            "For Image-to-Image, set DIFFUSION_IMG2IMG_URL to a Dedicated Endpoint or use 'cloudflare', 'aihorde', 'replicate', or 'stability'."
         )
     else:
         message = f"Provider '{provider}' ({model}) is configured and ready for Text-to-Image and Image-to-Image."
@@ -125,17 +141,14 @@ def get_runtime_diffusion_settings() -> Dict[str, Any]:
         "provider": provider,
         "model": model,
         "api_key": api_key,
+        "cloudflare_account_id": cloudflare_account_id,
         "base_url": base_url,
         "img2img_url": img2img_url,
         "replicate_version": replicate_version,
         "timeout_seconds": timeout_s,
         "supports_text_to_image": supports_t2i,
         "supports_image_to_image": supports_i2i,
-        "required_env_vars": [
-            "DIFFUSION_PROVIDER",
-            "DIFFUSION_API_KEY",
-            "DIFFUSION_MODEL",
-        ],
+        "required_env_vars": required_vars,
         "message": message,
     }
 
@@ -280,7 +293,33 @@ class HostedSDXLClient:
 
         try:
             with self._client(timeout_s) as client:
-                if provider == "huggingface":
+                if provider == "cloudflare":
+                    images = self._cloudflare_generate(
+                        client,
+                        cfg,
+                        prompt=final_prompt,
+                        negative_prompt=negative_prompt,
+                        width=width,
+                        height=height,
+                        num_images=num_images,
+                        steps=steps,
+                        guidance_scale=guidance_scale,
+                        seed=seed,
+                    )
+                elif provider == "aihorde":
+                    images = self._aihorde_generate(
+                        client,
+                        cfg,
+                        prompt=final_prompt,
+                        negative_prompt=negative_prompt,
+                        width=width,
+                        height=height,
+                        num_images=num_images,
+                        steps=steps,
+                        guidance_scale=guidance_scale,
+                        seed=seed,
+                    )
+                elif provider == "huggingface":
                     images = self._hf_text_to_image(
                         client, cfg, final_prompt, negative_prompt, width, height, num_images, steps, guidance_scale, seed
                     )
@@ -365,7 +404,37 @@ class HostedSDXLClient:
 
         try:
             with self._client(timeout_s) as client:
-                if provider == "replicate":
+                if provider == "cloudflare":
+                    images = self._cloudflare_generate(
+                        client,
+                        cfg,
+                        prompt=final_prompt,
+                        negative_prompt=negative_prompt,
+                        width=init_w,
+                        height=init_h,
+                        num_images=num_images,
+                        steps=steps,
+                        guidance_scale=guidance_scale,
+                        seed=seed,
+                        init_b64=init_b64,
+                        strength=strength,
+                    )
+                elif provider == "aihorde":
+                    images = self._aihorde_generate(
+                        client,
+                        cfg,
+                        prompt=final_prompt,
+                        negative_prompt=negative_prompt,
+                        width=init_w,
+                        height=init_h,
+                        num_images=num_images,
+                        steps=steps,
+                        guidance_scale=guidance_scale,
+                        seed=seed,
+                        init_b64=init_b64,
+                        strength=strength,
+                    )
+                elif provider == "replicate":
                     images = self._replicate_generate(
                         client,
                         cfg,
@@ -659,3 +728,147 @@ class HostedSDXLClient:
             "Custom SDXL endpoint response did not contain image bytes or base64 images.",
             status_code=502,
         )
+
+
+    def _cloudflare_generate(
+        self,
+        client: httpx.Client,
+        cfg: Dict[str, Any],
+        *,
+        prompt: str,
+        negative_prompt: str,
+        width: int,
+        height: int,
+        num_images: int,
+        steps: int,
+        guidance_scale: float,
+        seed: Optional[int],
+        init_b64: Optional[str] = None,
+        strength: Optional[float] = None,
+    ) -> List[Tuple[bytes, int, int]]:
+        account_id = cfg["cloudflare_account_id"]
+        model = cfg["model"]
+        url = cfg["base_url"] or (
+            f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
+        )
+        headers = {
+            "Authorization": f"Bearer {cfg['api_key']}",
+            "Content-Type": "application/json",
+        }
+        # Cloudflare Workers AI SDXL caps num_steps at 20
+        cf_steps = max(1, min(20, int(steps)))
+        base_seed = seed if seed is not None else int(time.time()) % 1_000_000
+
+        outputs: List[Tuple[bytes, int, int]] = []
+        for idx in range(num_images):
+            payload: Dict[str, Any] = {
+                "prompt": prompt,
+                "negative_prompt": negative_prompt,
+                "width": width,
+                "height": height,
+                "num_steps": cf_steps,
+                "guidance": guidance_scale,
+                "seed": base_seed + idx,
+            }
+            if init_b64 is not None:
+                payload["image_b64"] = init_b64
+                if strength is not None:
+                    payload["strength"] = strength
+
+            resp = client.post(url, headers=headers, json=payload)
+            if resp.status_code != 200:
+                _raise_for_provider_http_error(resp, "cloudflare")
+            outputs.append(_validate_image_bytes_to_png(resp.content))
+        return outputs
+
+    def _aihorde_generate(
+        self,
+        client: httpx.Client,
+        cfg: Dict[str, Any],
+        *,
+        prompt: str,
+        negative_prompt: str,
+        width: int,
+        height: int,
+        num_images: int,
+        steps: int,
+        guidance_scale: float,
+        seed: Optional[int],
+        init_b64: Optional[str] = None,
+        strength: Optional[float] = None,
+    ) -> List[Tuple[bytes, int, int]]:
+        base = cfg["base_url"] or "https://stablehorde.net/api/v2/generate/async"
+        headers = {
+            "Content-Type": "application/json",
+            "apikey": cfg["api_key"],
+            "Client-Agent": "ReefAugmentAI:1.0:local",
+        }
+        horde_prompt = f"{prompt} ### {negative_prompt}" if negative_prompt else prompt
+        params: Dict[str, Any] = {
+            "sampler_name": "k_euler",
+            "cfg_scale": guidance_scale,
+            "width": width,
+            "height": height,
+            "steps": steps,
+            "n": num_images,
+        }
+        if seed is not None:
+            params["seed"] = str(seed)
+
+        payload: Dict[str, Any] = {
+            "prompt": horde_prompt,
+            "params": params,
+            "models": [cfg["model"]],
+            "nsfw": False,
+            "censor_nsfw": True,
+            "r2": True,
+        }
+        if init_b64 is not None:
+            payload["source_image"] = init_b64
+            payload["source_processing"] = "img2img"
+            if strength is not None:
+                params["denoising_strength"] = strength
+
+        resp = client.post(base, headers=headers, json=payload)
+        if resp.status_code not in (200, 202):
+            _raise_for_provider_http_error(resp, "aihorde")
+        job_id = resp.json().get("id")
+        if not job_id:
+            raise GenerationProviderError("AI Horde did not return a generation job ID.", status_code=502)
+
+        status_url = f"https://stablehorde.net/api/v2/generate/status/{job_id}"
+        deadline = time.monotonic() + cfg["timeout_seconds"]
+        status_data: Dict[str, Any] = {}
+        while True:
+            if time.monotonic() > deadline:
+                raise GenerationProviderError(
+                    "AI Horde generation timed out in community queue. Retry or register a free AI Horde key for higher priority.",
+                    status_code=504,
+                )
+            time.sleep(2.0)
+            poll = client.get(status_url, headers={"Client-Agent": "ReefAugmentAI:1.0:local"})
+            if poll.status_code != 200:
+                _raise_for_provider_http_error(poll, "aihorde")
+            status_data = poll.json()
+            if status_data.get("faulted"):
+                raise GenerationProviderError("AI Horde worker faulted during generation.", status_code=502)
+            if status_data.get("done"):
+                break
+
+        generations = status_data.get("generations") or []
+        if not generations:
+            raise GenerationProviderError("AI Horde completed with zero generated images.", status_code=502)
+
+        outputs: List[Tuple[bytes, int, int]] = []
+        for gen_item in generations:
+            img_ref = gen_item.get("img") or ""
+            if img_ref.startswith("http://") or img_ref.startswith("https://"):
+                img_resp = client.get(img_ref)
+                if img_resp.status_code != 200:
+                    _raise_for_provider_http_error(img_resp, "aihorde")
+                outputs.append(_validate_image_bytes_to_png(img_resp.content))
+            elif img_ref:
+                outputs.append(_validate_image_bytes_to_png(base64.b64decode(img_ref)))
+        if not outputs:
+            raise GenerationProviderError("AI Horde returned unreadable image data.", status_code=502)
+        return outputs

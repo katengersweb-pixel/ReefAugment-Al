@@ -333,3 +333,90 @@ def test_image_to_image_replicate_preserves_source_and_safe_delete(isolated_gen_
     assert del_res.status_code == 200
     assert not gen_path.exists()
     assert orig_path.exists()
+
+
+
+def test_cloudflare_free_provider_t2i_and_i2i(isolated_gen_env, monkeypatch):
+    client, upload_dir, output_dir = isolated_gen_env
+    monkeypatch.setenv("DIFFUSION_PROVIDER", "cloudflare")
+    monkeypatch.setenv("DIFFUSION_API_KEY", "cf_dummy_token")
+    monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "acc_12345")
+
+    st = client.get("/api/generation/status").json()
+    assert st["configured"] is True
+    assert st["supports_text_to_image"] is True
+    assert st["supports_image_to_image"] is True
+    assert "CLOUDFLARE_ACCOUNT_ID" in st["required_env_vars"]
+
+    cf_png = _png_bytes(1024, 1024, (12, 110, 165))
+
+    def cf_handler(request):
+        assert "/accounts/acc_12345/ai/run/@cf/stabilityai/stable-diffusion-xl-base-1.0" in str(request.url)
+        body = json.loads(request.content.decode("utf-8"))
+        assert body["num_steps"] <= 20
+        return httpx.Response(200, content=cf_png, headers={"content-type": "image/png"})
+
+    transport = httpx.MockTransport(cf_handler)
+    monkeypatch.setattr(routes, "_get_sdxl_client", lambda: generation.HostedSDXLClient(transport=transport))
+
+    t2i = client.post(
+        "/api/generation/text-to-image",
+        json={
+            "prompt": "green sea turtle swimming over reef",
+            "species": "Turtle",
+            "style": "Photorealistic",
+            "width": 1024,
+            "height": 1024,
+            "num_images": 1,
+            "steps": 30,
+        },
+    )
+    assert t2i.status_code == 200, t2i.text
+    assert t2i.json()["provider"] == "cloudflare"
+
+    i2i = client.post(
+        "/api/generation/image-to-image",
+        files={"file": ("reef_turtle.png", _png_bytes(256, 256), "image/png")},
+        data={"prompt": "sunlight beams", "species": "Turtle", "style": "Natural Underwater", "strength": "0.5"},
+    )
+    assert i2i.status_code == 200, i2i.text
+    assert (output_dir / i2i.json()["images"][0]["output_filename"]).exists()
+
+
+def test_aihorde_free_provider_t2i(isolated_gen_env, monkeypatch):
+    client, _, output_dir = isolated_gen_env
+    monkeypatch.setenv("DIFFUSION_PROVIDER", "aihorde")
+    monkeypatch.setenv("DIFFUSION_API_KEY", "0000000000")
+
+    horde_png = _png_bytes(768, 768, (20, 140, 150))
+
+    def horde_handler(request):
+        if request.method == "POST" and "/api/v2/generate/async" in str(request.url):
+            return httpx.Response(202, json={"id": "horde_job_1"})
+        if request.method == "GET" and "/api/v2/generate/status/horde_job_1" in str(request.url):
+            return httpx.Response(
+                200,
+                json={"done": True, "faulted": False, "generations": [{"img": "https://r2.example.com/out.png"}]},
+            )
+        if request.method == "GET" and "r2.example.com/out.png" in str(request.url):
+            return httpx.Response(200, content=horde_png, headers={"content-type": "image/png"})
+        return httpx.Response(404)
+
+    monkeypatch.setattr(generation.time, "sleep", lambda _s: None)
+    transport = httpx.MockTransport(horde_handler)
+    monkeypatch.setattr(routes, "_get_sdxl_client", lambda: generation.HostedSDXLClient(transport=transport))
+
+    res = client.post(
+        "/api/generation/text-to-image",
+        json={
+            "prompt": "reef shark in clear water",
+            "species": "Shark",
+            "style": "Scientific Photography",
+            "width": 768,
+            "height": 768,
+            "num_images": 1,
+        },
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["provider"] == "aihorde"
+    assert (output_dir / res.json()["images"][0]["output_filename"]).exists()

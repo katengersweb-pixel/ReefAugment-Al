@@ -51,6 +51,7 @@ DIFFUSION_REPLICATE_VERSION = os.getenv(
     "DIFFUSION_REPLICATE_VERSION",
     "7762fd07cf82c948538e41f63f77d685e02b063e37e496e96eefd46c929f9bdc",
 ).strip()
+CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
 DIFFUSION_TIMEOUT_SECONDS = float(os.getenv("DIFFUSION_TIMEOUT_SECONDS", "120"))
 
 
@@ -70,6 +71,10 @@ def get_diffusion_api_key(provider: str | None = None) -> str:
         return os.getenv("REPLICATE_API_TOKEN", "").strip()
     if active_provider == "stability":
         return os.getenv("STABILITY_API_KEY", "").strip()
+    if active_provider == "cloudflare":
+        return os.getenv("CLOUDFLARE_API_TOKEN", "").strip()
+    if active_provider == "aihorde":
+        return os.getenv("AI_HORDE_API_KEY", "").strip()
     return ""
 
 
