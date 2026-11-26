@@ -162,12 +162,16 @@ export async function downloadFileFromEndpoint(endpointPath, fallbackFilename) {
   window.URL.revokeObjectURL(blobUrl);
 }
 
-export async function exportSelectedZip(resultIds) {
-  const response = await apiClient.post(
-    '/api/export/zip',
-    { result_ids: resultIds },
-    { responseType: 'blob' }
-  );
+export async function exportSelectedZip(selection) {
+  const payload = Array.isArray(selection)
+    ? { result_ids: selection }
+    : {
+        result_ids: selection?.resultIds || [],
+        generated_ids: selection?.generatedIds || [],
+      };
+  const response = await apiClient.post('/api/export/zip', payload, {
+    responseType: 'blob',
+  });
   const blobUrl = window.URL.createObjectURL(new Blob([response.data]));
   const link = document.createElement('a');
   link.href = blobUrl;
@@ -176,6 +180,45 @@ export async function exportSelectedZip(resultIds) {
   link.click();
   link.remove();
   window.URL.revokeObjectURL(blobUrl);
+}
+
+// ---------------------------------------------------------------------------
+// AI Image Generation Studio (Hosted SDXL)
+// ---------------------------------------------------------------------------
+
+export async function getGenerationStatus() {
+  const { data } = await apiClient.get('/api/generation/status');
+  return data;
+}
+
+export async function generateTextToImage(payload) {
+  const { data } = await apiClient.post('/api/generation/text-to-image', payload, {
+    timeout: 180000,
+  });
+  return data;
+}
+
+export async function generateImageToImage(formData) {
+  const { data } = await apiClient.post('/api/generation/image-to-image', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 180000,
+  });
+  return data;
+}
+
+export async function getGenerationHistory(params = {}) {
+  const { data } = await apiClient.get('/api/generation/history', { params });
+  return data;
+}
+
+export async function deleteGeneratedImage(genId) {
+  const { data } = await apiClient.delete(`/api/generation/${genId}`);
+  return data;
+}
+
+export async function sendGeneratedToAugment(genId) {
+  const { data } = await apiClient.post(`/api/generation/${genId}/send-to-augment`);
+  return data;
 }
 
 export default apiClient;

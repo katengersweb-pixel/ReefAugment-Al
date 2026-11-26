@@ -26,6 +26,10 @@ Underwater imagery commonly suffers from poor visibility, blue-green color casts
   13. **Underwater Particles** (marine snow, plankton specks, and micro-bubbles with density, brightness, and size controls)
   14. **Perspective Transformation** (controlled 4-point camera tilt distortion)
   15. **Elastic Transformation** (smooth water-refraction style deformation bounded to avoid tearing subjects)
+- **AI Image Generation Studio (SDXL)**: Generate synthetic underwater species images via hosted **Stable Diffusion XL (SDXL)** inference across two modes:
+  - **Text-to-Image**: Prompt + species category (`Fish`, `Shark`, `Turtle`, `Jellyfish`, `Dolphin`, `Coral`, `Other`), visual style (`Photorealistic`, `Scientific Photography`, `Natural Underwater`), SDXL resolution presets, steps, CFG scale, seed, and 1–4 outputs.
+  - **Image-to-Image**: Upload a source image (preserved untouched) or pick from dataset uploads, add an optional modification prompt, tune transformation strength (`0.10–0.95`), compare side-by-side, and download variations.
+  - **Dataset Integration**: Synthetic outputs are saved in `backend/outputs/`, labeled clearly as synthetic, displayed in **Results Gallery**, exportable in ZIP manifests, and can be sent directly into all **15 augmentation techniques**.
 - **Batch Processing**: Select multiple source images, choose multiple techniques, specify variations per technique, tune base parameters, calculate expected total outputs (`images × techniques × variations`), track live background progress, inspect individual item outcomes, retry failed items, and download the entire batch as a ZIP.
 - **Results Gallery**: Search by filename, filter by technique, sort newest/oldest, paginate large datasets, inspect lightbox previews, download individual results, multi-select for ZIP export, and safely delete generated results without ever deleting original uploaded images.
 - **Before & After Comparison**: Compare original and augmented images side-by-side or with an interactive split-screen slider, inspect dimensions/file sizes/parameters, and download either image.
@@ -41,7 +45,7 @@ Underwater imagery commonly suffers from poor visibility, blue-green color casts
 | --- | --- |
 | **Frontend** | React 19, Vite 6, JavaScript, Tailwind CSS v4, React Router DOM, Axios, Lucide React, Recharts |
 | **Backend** | Python (3.12+ / 3.14), FastAPI, Uvicorn, OpenCV (`opencv-python-headless`), Albumentations, Pillow, NumPy, python-multipart |
-| **Database** | SQLite with SQLAlchemy ORM (`UploadedImage`, `AugmentationResult`, `ProcessingJob`, `ProcessingHistory`) |
+| **Database** | SQLite with SQLAlchemy ORM (`UploadedImage`, `AugmentationResult`, `ProcessingJob`, `ProcessingHistory`, `GeneratedImage`) |
 | **Storage** | Local disk (`backend/uploads/` for originals, `backend/outputs/` for augmented outputs, `backend/database/` for SQLite) |
 
 ---
@@ -55,13 +59,15 @@ ReefAugment-AI/
 │   ├── uploads/                # Original uploaded images (preserved)
 │   ├── outputs/                # Generated augmented images
 │   ├── tests/
-│   │   └── test_api.py         # Automated backend test suite
+│   │   ├── test_api.py         # Automated backend augmentation & API test suite
+│   │   └── test_generation.py  # Automated SDXL generation validation & integration tests
 │   ├── augmentation.py         # 15 techniques, parameter validation & pipelines
-│   ├── config.py               # Paths, upload limits & CORS configuration
+│   ├── config.py               # Paths, upload limits, CORS & diffusion env config
 │   ├── database.py             # SQLAlchemy engine & session setup
+│   ├── generation.py           # Hosted SDXL diffusion provider client
 │   ├── main.py                 # FastAPI app, static file mounts & startup
 │   ├── models.py               # SQLAlchemy ORM tables
-│   ├── routes.py               # REST API endpoints & batch/ZIP handlers
+│   ├── routes.py               # REST API endpoints, batch/ZIP & SDXL generation routes
 │   ├── schemas.py              # Pydantic request/response schemas
 │   ├── underwater_effects.py   # Underwater haze & suspended particles engines
 │   ├── utils.py                # Validation, unique naming & path safety helpers
@@ -71,7 +77,7 @@ ReefAugment-AI/
 │   ├── src/
 │   │   ├── components/         # ToastContext, ConfirmDialog, TechniqueControls, UiStates
 │   │   ├── layouts/            # MainLayout (sidebar, top bar, health check, quick ZIP)
-│   │   ├── pages/              # All 8 application pages
+│   │   ├── pages/              # All 9 application pages (including AIGenerationStudio.jsx)
 │   │   ├── services/           # Centralized Axios API client (api.js)
 │   │   ├── App.jsx             # Router configuration
 │   │   ├── main.jsx            # React entrypoint
@@ -194,8 +200,49 @@ The frontend is pre-configured for GitHub Pages deployment at `https://Nishu1270
 ## Database & Storage Details
 
 - The SQLite database (`backend/database/reefaugment.db`) is created automatically on backend startup.
-- Four relational tables are maintained: `uploaded_images`, `augmentation_results`, `processing_jobs`, and `processing_history`.
-- Original uploads live in `backend/uploads/` and generated outputs live in `backend/outputs/`. Deleting an augmented image from the Results Gallery never deletes its source upload.
+- Five relational tables are maintained: `uploaded_images`, `augmentation_results`, `processing_jobs`, `processing_history`, and `generated_images`.
+- Original uploads live in `backend/uploads/` and generated outputs live in `backend/outputs/`. Deleting an augmented or AI-generated image from the Results Gallery never deletes its source upload.
+
+---
+
+## AI Image Generation Studio (Hosted SDXL Diffusion)
+
+### How the Diffusion Model Works
+
+ReefAugment AI integrates **Stable Diffusion XL (SDXL)** through a configurable **hosted GPU inference provider** (`backend/generation.py`). Instead of downloading multi-gigabyte diffusion weights locally per request, the FastAPI backend constructs structured marine species prompts, submits inference calls securely with backend-only API tokens, validates returned PNG bytes with Pillow, saves outputs to `backend/outputs/`, and logs generation metadata to SQLite (`generated_images`).
+
+> **Synthetic Data Notice:** All diffusion outputs are labeled `SYNTHETIC AI` (`is_synthetic: true`). They are designed to expand visual diversity for computer vision workflows and are **not** scientifically verified species photographs.
+
+### Provider Configuration & Required Environment Variables
+
+Create `backend/.env` (copy from `backend/.env.example`) and configure your provider credentials on the **backend only** (never expose tokens in `frontend/`):
+
+| Variable | Required | Default / Example | Description |
+| --- | --- | --- | --- |
+| `DIFFUSION_PROVIDER` | Yes | `huggingface` | Hosted provider: `huggingface`, `replicate`, `stability`, or `custom` |
+| `DIFFUSION_API_KEY` | Yes | *(your provider token)* | Secret API key/token for the selected provider |
+| `DIFFUSION_MODEL` | Optional | `stabilityai/stable-diffusion-xl-base-1.0` | SDXL model identifier (`stability-ai/sdxl` for Replicate, `stable-diffusion-xl-1024-v1-0` for Stability) |
+| `DIFFUSION_TIMEOUT_SECONDS` | Optional | `120` | Request timeout in seconds |
+| `DIFFUSION_API_BASE_URL` | Optional | *(empty)* | Custom endpoint URL (required when `DIFFUSION_PROVIDER=custom`) |
+| `DIFFUSION_IMG2IMG_URL` | Optional | *(empty)* | Dedicated endpoint URL for Image-to-Image (needed on `huggingface` if not using `replicate` or `stability`) |
+
+**Provider Capability Notes:**
+- **`huggingface`**: Supports SDXL **Text-to-Image** out of the box via `router.huggingface.co/hf-inference/models/...`. For **Image-to-Image**, set `DIFFUSION_IMG2IMG_URL` to a dedicated inference endpoint or use `replicate` / `stability`.
+- **`replicate`**: Supports **both** SDXL Text-to-Image and Image-to-Image (`stability-ai/sdxl`) natively using one `DIFFUSION_API_KEY`.
+- **`stability`**: Supports **both** SDXL Text-to-Image and Image-to-Image (`stable-diffusion-xl-1024-v1-0`) natively.
+- **`custom`**: Calls your own hosted SDXL HTTP endpoint (`DIFFUSION_API_BASE_URL` / `DIFFUSION_IMG2IMG_URL`).
+
+If credentials are missing, `/api/generation/status` returns `configured: false` with setup guidance, and generation requests return HTTP `503` without fabricating fake images.
+
+### Generation API Endpoints
+
+- `GET /api/generation/status` — Returns active provider, model, capability flags, allowed species/styles/dimensions, and configuration readiness (never exposes secrets).
+- `POST /api/generation/text-to-image` — Validates prompt, species, visual style, SDXL resolution, steps, CFG scale, seed, and `num_images` (1–4); generates and persists PNG outputs.
+- `POST /api/generation/image-to-image` — Accepts `multipart/form-data` with a newly uploaded image `file` or existing `image_id`, optional modification `prompt`, `strength` (`0.10–0.95`), and generation parameters.
+- `GET /api/generation/history` — Queries persisted SQLite SDXL generation records (`mode`, `species`, `status`, `search`, `limit`, `offset`).
+- `GET /api/generation/{gen_id}/download` — Downloads a generated PNG safely from `backend/outputs/`.
+- `POST /api/generation/{gen_id}/send-to-augment` — Registers the synthetic image into `backend/uploads/` (`UploadedImage`) so it can be processed by all 15 augmentation techniques.
+- `DELETE /api/generation/{gen_id}` — Deletes a generated output without affecting source uploaded images.
 
 ---
 

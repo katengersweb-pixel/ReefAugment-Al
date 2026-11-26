@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   Search,
   Download,
@@ -13,8 +13,10 @@ import {
   X,
   ChevronLeft,
   ChevronRight,
+  Wand2,
 } from 'lucide-react';
 import {
+  deleteGeneratedImage,
   deleteResult,
   downloadFileFromEndpoint,
   exportSelectedZip,
@@ -22,6 +24,7 @@ import {
   getResults,
   getTechniques,
   resolveMediaUrl,
+  sendGeneratedToAugment,
 } from '../services/api';
 import { useToast } from '../components/ToastContext';
 import ConfirmDialog from '../components/ConfirmDialog';
@@ -47,12 +50,15 @@ export default function ResultsGallery() {
   const [sortOrder, setSortOrder] = useState('newest');
   const [offset, setOffset] = useState(0);
 
-  const [selectedIds, setSelectedIds] = useState([]);
+  const [selectedKeys, setSelectedKeys] = useState([]);
   const [previewItem, setPreviewItem] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [deleting, setDeleting] = useState(false);
 
+  const navigate = useNavigate();
   const toast = useToast();
+
+  const getItemKey = (item) => `${item.origin_type || 'augmented'}_${item.id}`;
 
   const fetchResults = async (opts = {}) => {
     setLoading(true);
@@ -96,9 +102,10 @@ export default function ResultsGallery() {
     fetchResults({ search: nextSearch, technique: nextTech, sort: nextSort, offset: 0 });
   };
 
-  const toggleSelect = (id) => {
-    setSelectedIds((prev) =>
-      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+  const toggleSelect = (item) => {
+    const key = getItemKey(item);
+    setSelectedKeys((prev) =>
+      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]
     );
   };
 
@@ -106,9 +113,15 @@ export default function ResultsGallery() {
     if (!deleteTarget) return;
     setDeleting(true);
     try {
-      await deleteResult(deleteTarget.id);
+      const isAi = deleteTarget.origin_type === 'ai_generated';
+      if (isAi) {
+        await deleteGeneratedImage(deleteTarget.generation_id || deleteTarget.id);
+      } else {
+        await deleteResult(deleteTarget.id);
+      }
       toast.success(`Deleted '${deleteTarget.output_filename}'. Original image remains preserved.`);
-      setSelectedIds((prev) => prev.filter((id) => id !== deleteTarget.id));
+      const targetKey = getItemKey(deleteTarget);
+      setSelectedKeys((prev) => prev.filter((k) => k !== targetKey));
       setDeleteTarget(null);
       await fetchResults();
     } catch (err) {
@@ -118,11 +131,30 @@ export default function ResultsGallery() {
     }
   };
 
-  const handleExportSelected = async () => {
-    if (selectedIds.length === 0) return;
+  const handleSendToAugment = async (item) => {
     try {
-      await exportSelectedZip(selectedIds);
-      toast.success(`Exported ${selectedIds.length} selected image(s) as ZIP.`);
+      const uploaded = await sendGeneratedToAugment(item.generation_id || item.id);
+      toast.success('Synthetic image added to dataset. Opening Augmentation Studio...');
+      navigate(`/studio?imageId=${uploaded.id}`);
+    } catch (err) {
+      toast.error(extractErrorMessage(err, 'Failed to pass image into Augmentation Studio.'));
+    }
+  };
+
+  const handleExportSelected = async () => {
+    if (selectedKeys.length === 0) return;
+    const resultIds = [];
+    const generatedIds = [];
+    selectedKeys.forEach((key) => {
+      if (key.startsWith('ai_generated_')) {
+        generatedIds.push(Number(key.replace('ai_generated_', '')));
+      } else {
+        resultIds.push(Number(key.replace('augmented_', '')));
+      }
+    });
+    try {
+      await exportSelectedZip({ resultIds, generatedIds });
+      toast.success(`Exported ${selectedKeys.length} selected image(s) as ZIP.`);
     } catch (err) {
       toast.error(extractErrorMessage(err, 'Failed to export selected images.'));
     }
@@ -162,7 +194,10 @@ export default function ResultsGallery() {
               onChange={(e) => handleFilterChange(search, e.target.value, sortOrder)}
               className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-800 focus:border-cyan-500 focus:outline-none"
             >
-              <option value="all">All Techniques</option>
+              <option value="all">All Techniques & AI</option>
+              <option value="ai_generated">AI Generated (All SDXL)</option>
+              <option value="sdxl_text_to_image">SDXL Text-to-Image (Synthetic)</option>
+              <option value="sdxl_image_to_image">SDXL Image-to-Image (Synthetic)</option>
               {techniques.map((t) => (
                 <option key={t.key} value={t.key}>
                   {t.name}
@@ -181,14 +216,14 @@ export default function ResultsGallery() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            {selectedIds.length > 0 && (
+            {selectedKeys.length > 0 && (
               <button
                 type="button"
                 onClick={handleExportSelected}
                 className="inline-flex items-center gap-1.5 rounded-xl bg-teal-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-teal-700 cursor-pointer"
               >
                 <Archive className="w-3.5 h-3.5" />
-                Export Selected ({selectedIds.length})
+                Export Selected ({selectedKeys.length})
               </button>
             )}
             <button
@@ -227,10 +262,12 @@ export default function ResultsGallery() {
         <>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
             {results.map((item) => {
-              const isSelected = selectedIds.includes(item.id);
+              const itemKey = getItemKey(item);
+              const isSelected = selectedKeys.includes(itemKey);
+              const isAi = item.origin_type === 'ai_generated' || item.is_synthetic;
               return (
                 <div
-                  key={item.id}
+                  key={itemKey}
                   className={`rounded-2xl border bg-white overflow-hidden shadow-2xs hover:shadow-md transition flex flex-col ${
                     isSelected ? 'border-cyan-500 ring-2 ring-cyan-500/20' : 'border-slate-200'
                   }`}
@@ -244,7 +281,7 @@ export default function ResultsGallery() {
                     />
                     <button
                       type="button"
-                      onClick={() => toggleSelect(item.id)}
+                      onClick={() => toggleSelect(item)}
                       className="absolute top-2.5 left-2.5 rounded-lg bg-white/90 p-1 text-cyan-700 shadow cursor-pointer"
                       title="Select for ZIP export"
                     >
@@ -254,6 +291,11 @@ export default function ResultsGallery() {
                         <Square className="w-4 h-4 text-slate-400" />
                       )}
                     </button>
+                    {isAi && (
+                      <span className="absolute top-2.5 right-2.5 rounded-md bg-amber-500 px-2 py-0.5 text-[10px] font-bold text-slate-950 shadow">
+                        SYNTHETIC AI
+                      </span>
+                    )}
                     <span className="absolute bottom-2.5 left-2.5 rounded-md bg-slate-950/75 px-2 py-0.5 text-[10px] font-semibold text-cyan-200">
                       {item.technique_label}
                     </span>
@@ -264,8 +306,16 @@ export default function ResultsGallery() {
                       <p className="text-xs font-bold text-slate-900 truncate" title={item.output_filename}>
                         {item.output_filename}
                       </p>
-                      <p className="text-[11px] text-slate-500 truncate mt-0.5">
-                        Source: <span className="font-medium text-slate-700">{item.original_filename || '—'}</span>
+                      <p className="text-[11px] text-slate-500 truncate mt-0.5" title={item.prompt || item.original_filename || ''}>
+                        {isAi && item.prompt ? (
+                          <>
+                            Prompt: <span className="font-medium text-slate-700">{item.prompt}</span>
+                          </>
+                        ) : (
+                          <>
+                            Source: <span className="font-medium text-slate-700">{item.original_filename || '—'}</span>
+                          </>
+                        )}
                       </p>
                       <p className="text-[11px] text-slate-400 mt-1">
                         {item.width}x{item.height}px • {formatBytes(item.file_size)}
@@ -282,13 +332,24 @@ export default function ResultsGallery() {
                       >
                         <Eye className="w-3.5 h-3.5" />
                       </button>
-                      <Link
-                        to={`/comparison?originalId=${item.original_image_id}&resultId=${item.id}`}
-                        className="flex-1 inline-flex items-center justify-center gap-1 rounded-xl bg-cyan-50 px-2.5 py-1.5 text-xs font-semibold text-cyan-800 hover:bg-cyan-100"
-                      >
-                        <SplitSquareHorizontal className="w-3.5 h-3.5" />
-                        Compare
-                      </Link>
+                      {isAi ? (
+                        <button
+                          type="button"
+                          onClick={() => handleSendToAugment(item)}
+                          className="flex-1 inline-flex items-center justify-center gap-1 rounded-xl bg-cyan-50 px-2.5 py-1.5 text-xs font-semibold text-cyan-800 hover:bg-cyan-100 cursor-pointer"
+                        >
+                          <Wand2 className="w-3.5 h-3.5" />
+                          Augment
+                        </button>
+                      ) : (
+                        <Link
+                          to={`/comparison?originalId=${item.original_image_id}&resultId=${item.id}`}
+                          className="flex-1 inline-flex items-center justify-center gap-1 rounded-xl bg-cyan-50 px-2.5 py-1.5 text-xs font-semibold text-cyan-800 hover:bg-cyan-100"
+                        >
+                          <SplitSquareHorizontal className="w-3.5 h-3.5" />
+                          Compare
+                        </Link>
+                      )}
                       <button
                         type="button"
                         onClick={() => downloadFileFromEndpoint(item.download_url, item.output_filename)}

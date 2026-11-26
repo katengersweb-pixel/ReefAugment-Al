@@ -10,6 +10,7 @@ import ResultsGallery from './pages/ResultsGallery';
 import Comparison from './pages/Comparison';
 import DatasetSummary from './pages/DatasetSummary';
 import History from './pages/History';
+import AIGenerationStudio from './pages/AIGenerationStudio';
 
 export default function App() {
   return (
@@ -20,6 +21,7 @@ export default function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/upload" element={<Upload />} />
             <Route path="/studio" element={<AugmentationStudio />} />
+            <Route path="/generate" element={<AIGenerationStudio />} />
             <Route path="/batch" element={<BatchProcessing />} />
             <Route path="/gallery" element={<ResultsGallery />} />
             <Route path="/comparison" element={<Comparison />} />

@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Column, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from database import Base
@@ -140,3 +140,52 @@ class ProcessingHistory(Base):
     job = relationship("ProcessingJob", back_populates="history_entries")
     original_image = relationship("UploadedImage", back_populates="history_entries")
     result = relationship("AugmentationResult", back_populates="history_entries")
+
+
+
+class GeneratedImage(Base):
+    """Metadata for synthetic underwater species images produced by SDXL diffusion."""
+
+    __tablename__ = "generated_images"
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(
+        Integer,
+        ForeignKey("processing_jobs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    source_image_id = Column(
+        Integer,
+        ForeignKey("uploaded_images.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    imported_image_id = Column(
+        Integer,
+        ForeignKey("uploaded_images.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    mode = Column(String(32), nullable=False, index=True)  # "text_to_image" | "image_to_image"
+    species = Column(String(64), nullable=False, default="Other")
+    style = Column(String(64), nullable=False, default="Photorealistic")
+    prompt = Column(Text, nullable=False)
+    final_prompt = Column(Text, nullable=False)
+    negative_prompt = Column(Text, nullable=True)
+    provider = Column(String(64), nullable=False)
+    model = Column(String(255), nullable=False)
+    parameters = Column(JSON, nullable=False, default=dict)
+    output_filename = Column(String(255), nullable=True, unique=True, index=True)
+    output_path = Column(String(512), nullable=True)
+    width = Column(Integer, nullable=False, default=0)
+    height = Column(Integer, nullable=False, default=0)
+    file_size = Column(Integer, nullable=False, default=0)
+    is_synthetic = Column(Boolean, nullable=False, default=True)
+    status = Column(String(32), nullable=False, default="success", index=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=utc_now, nullable=False, index=True)
+
+    job = relationship("ProcessingJob", foreign_keys=[job_id])
+    source_image = relationship("UploadedImage", foreign_keys=[source_image_id])
+    imported_image = relationship("UploadedImage", foreign_keys=[imported_image_id])

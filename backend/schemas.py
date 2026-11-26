@@ -182,4 +182,74 @@ class SummaryChartsResponse(BaseModel):
 
 class ZipExportRequest(BaseModel):
     result_ids: Optional[List[int]] = None
+    generated_ids: Optional[List[int]] = None
     job_id: Optional[int] = None
+    include_generated: bool = True
+
+
+
+class GenerationStatusResponse(BaseModel):
+    configured: bool
+    provider: str
+    model: str
+    supports_text_to_image: bool
+    supports_image_to_image: bool
+    required_env_vars: List[str]
+    allowed_species: List[str]
+    allowed_styles: List[str]
+    allowed_dimensions: List[str]
+    message: str
+
+
+class TextToImageRequest(BaseModel):
+    prompt: str = Field(..., min_length=3, max_length=1000)
+    species: str = "Fish"
+    style: str = "Photorealistic"
+    width: int = 1024
+    height: int = 1024
+    num_images: int = Field(1, ge=1, le=4)
+    negative_prompt: Optional[str] = Field(None, max_length=500)
+    steps: int = Field(30, ge=15, le=50)
+    guidance_scale: float = Field(7.5, ge=1.0, le=15.0)
+    seed: Optional[int] = Field(None, ge=0, le=2147483647)
+
+
+class GeneratedImageResponse(BaseModel):
+    id: int
+    job_id: Optional[int] = None
+    source_image_id: Optional[int] = None
+    source_filename: Optional[str] = None
+    source_image_url: Optional[str] = None
+    imported_image_id: Optional[int] = None
+    mode: str
+    species: str
+    style: str
+    prompt: str
+    final_prompt: str
+    negative_prompt: Optional[str] = None
+    provider: str
+    model: str
+    parameters: Dict[str, Any] = Field(default_factory=dict)
+    output_filename: Optional[str] = None
+    width: int = 0
+    height: int = 0
+    file_size: int = 0
+    is_synthetic: bool = True
+    synthetic_label: str = "Synthetic AI Generated (SDXL)"
+    disclaimer: str
+    status: str
+    error_message: Optional[str] = None
+    created_at: datetime
+    image_url: Optional[str] = None
+    download_url: Optional[str] = None
+
+
+class GenerationBatchResponse(BaseModel):
+    job_id: int
+    mode: str
+    provider: str
+    model: str
+    is_synthetic: bool = True
+    disclaimer: str
+    source_image: Optional[UploadedImageResponse] = None
+    images: List[GeneratedImageResponse]

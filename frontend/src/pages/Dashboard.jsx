@@ -94,6 +94,13 @@ export default function Dashboard() {
               Open Studio
             </Link>
             <Link
+              to="/generate"
+              className="inline-flex items-center gap-2 rounded-xl bg-white/10 px-4 py-2.5 text-xs font-semibold text-white ring-1 ring-white/20 hover:bg-white/20 transition"
+            >
+              <Sparkles className="w-4 h-4 text-teal-300" />
+              AI Generation
+            </Link>
+            <Link
               to="/batch"
               className="inline-flex items-center gap-2 rounded-xl bg-white/10 px-4 py-2.5 text-xs font-semibold text-white ring-1 ring-white/20 hover:bg-white/20 transition"
             >

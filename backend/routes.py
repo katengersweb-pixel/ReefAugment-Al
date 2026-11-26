@@ -15,6 +15,7 @@ from fastapi import (
     BackgroundTasks,
     Depends,
     File,
+    Form,
     HTTPException,
     Query,
     UploadFile,
@@ -36,7 +37,25 @@ from augmentation import (
 )
 from config import OUTPUT_DIR, TEMP_DIR, UPLOAD_DIR, ensure_directories
 from database import SessionLocal, get_db
-from models import AugmentationResult, ProcessingHistory, ProcessingJob, UploadedImage, utc_now
+from generation import (
+    ALLOWED_DIMENSIONS,
+    ALLOWED_SPECIES,
+    ALLOWED_STYLES,
+    DEFAULT_NEGATIVE_PROMPT,
+    GenerationProviderError,
+    HostedSDXLClient,
+    build_underwater_prompt,
+    get_runtime_diffusion_settings,
+    validate_sdxl_dimensions,
+)
+from models import (
+    AugmentationResult,
+    GeneratedImage,
+    ProcessingHistory,
+    ProcessingJob,
+    UploadedImage,
+    utc_now,
+)
 from schemas import (
     AugmentationResultResponse,
     AugmentPreviewResponse,
@@ -46,10 +65,14 @@ from schemas import (
     BatchRequest,
     ComparisonResponse,
     DashboardResponse,
+    GeneratedImageResponse,
+    GenerationBatchResponse,
+    GenerationStatusResponse,
     HistoryEntryResponse,
     SummaryChartsResponse,
     SummaryResponse,
     TechniqueMeta,
+    TextToImageRequest,
     UploadBatchResponse,
     UploadedImageResponse,
     ZipExportRequest,
@@ -83,25 +106,111 @@ def _serialize_uploaded_image(img: UploadedImage, aug_count: int = 0) -> Uploade
     )
 
 
-def _serialize_result(res: AugmentationResult) -> AugmentationResultResponse:
-    orig = res.original_image
-    return AugmentationResultResponse(
-        id=res.id,
-        original_image_id=res.original_image_id,
-        original_filename=orig.original_filename if orig else None,
-        original_image_url=f"/static/uploads/{orig.stored_filename}" if orig else None,
-        job_id=res.job_id,
-        output_filename=res.output_filename,
-        technique=res.technique,
-        technique_label=get_technique_label(res.technique),
-        parameters=res.parameters or {},
-        width=res.width,
-        height=res.height,
-        file_size=res.file_size,
-        created_at=res.created_at,
-        image_url=f"/static/outputs/{res.output_filename}",
-        download_url=f"/api/results/{res.id}/download",
+SYNTHETIC_DISCLAIMER = (
+    "Synthetic AI-generated image (SDXL). Not a scientifically verified species photograph."
+)
+
+
+def _get_sdxl_client() -> HostedSDXLClient:
+    """Factory for hosted SDXL client (easy to mock in tests)."""
+    return HostedSDXLClient()
+
+
+def _serialize_generated_image(gen: GeneratedImage) -> GeneratedImageResponse:
+    src = gen.source_image
+    has_file = bool(gen.output_filename) and gen.status == "success"
+    return GeneratedImageResponse(
+        id=gen.id,
+        job_id=gen.job_id,
+        source_image_id=gen.source_image_id,
+        source_filename=src.original_filename if src else None,
+        source_image_url=f"/static/uploads/{src.stored_filename}" if src else None,
+        imported_image_id=gen.imported_image_id,
+        mode=gen.mode,
+        species=gen.species,
+        style=gen.style,
+        prompt=gen.prompt,
+        final_prompt=gen.final_prompt,
+        negative_prompt=gen.negative_prompt,
+        provider=gen.provider,
+        model=gen.model,
+        parameters=gen.parameters or {},
+        output_filename=gen.output_filename,
+        width=gen.width,
+        height=gen.height,
+        file_size=gen.file_size,
+        is_synthetic=bool(gen.is_synthetic),
+        synthetic_label="Synthetic AI Generated (SDXL)",
+        disclaimer=SYNTHETIC_DISCLAIMER,
+        status=gen.status,
+        error_message=gen.error_message,
+        created_at=gen.created_at,
+        image_url=f"/static/outputs/{gen.output_filename}" if has_file else None,
+        download_url=f"/api/generation/{gen.id}/download" if has_file else None,
     )
+
+
+def _serialize_result(res: AugmentationResult) -> Dict[str, Any]:
+    orig = res.original_image
+    return {
+        "id": res.id,
+        "origin_type": "augmented",
+        "generation_id": None,
+        "original_image_id": res.original_image_id,
+        "original_filename": orig.original_filename if orig else None,
+        "original_image_url": f"/static/uploads/{orig.stored_filename}" if orig else None,
+        "job_id": res.job_id,
+        "output_filename": res.output_filename,
+        "technique": res.technique,
+        "technique_label": get_technique_label(res.technique),
+        "parameters": res.parameters or {},
+        "width": res.width,
+        "height": res.height,
+        "file_size": res.file_size,
+        "created_at": res.created_at,
+        "image_url": f"/static/outputs/{res.output_filename}",
+        "download_url": f"/api/results/{res.id}/download",
+        "is_synthetic": False,
+        "prompt": None,
+        "model": None,
+        "species": None,
+        "style": None,
+    }
+
+
+def _serialize_generated_for_gallery(gen: GeneratedImage) -> Dict[str, Any]:
+    src = gen.source_image
+    tech_key = "sdxl_text_to_image" if gen.mode == "text_to_image" else "sdxl_image_to_image"
+    tech_label = (
+        "SDXL Text-to-Image (Synthetic)"
+        if gen.mode == "text_to_image"
+        else "SDXL Image-to-Image (Synthetic)"
+    )
+    return {
+        "id": gen.id,
+        "origin_type": "ai_generated",
+        "generation_id": gen.id,
+        "original_image_id": gen.source_image_id,
+        "original_filename": src.original_filename if src else f"Synthetic {gen.species}",
+        "original_image_url": f"/static/uploads/{src.stored_filename}" if src else None,
+        "imported_image_id": gen.imported_image_id,
+        "job_id": gen.job_id,
+        "output_filename": gen.output_filename,
+        "technique": tech_key,
+        "technique_label": tech_label,
+        "parameters": gen.parameters or {},
+        "width": gen.width,
+        "height": gen.height,
+        "file_size": gen.file_size,
+        "created_at": gen.created_at,
+        "image_url": f"/static/outputs/{gen.output_filename}",
+        "download_url": f"/api/generation/{gen.id}/download",
+        "is_synthetic": True,
+        "prompt": gen.prompt,
+        "model": gen.model,
+        "species": gen.species,
+        "style": gen.style,
+    }
 
 
 def _serialize_history(entry: ProcessingHistory) -> HistoryEntryResponse:
@@ -137,9 +246,11 @@ def _build_zip_export(
     results: List[AugmentationResult],
     zip_filename: str,
     background_tasks: BackgroundTasks,
+    generated_items: Optional[List[GeneratedImage]] = None,
 ) -> FileResponse:
-    """Package augmentation results and manifest.json into a temporary ZIP."""
-    if not results:
+    """Package augmentation and AI-generated results plus manifest.json into a temporary ZIP."""
+    gen_list = generated_items or []
+    if not results and not gen_list:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No generated images available for export.",
@@ -170,6 +281,8 @@ def _build_zip_export(
             )
             manifest_items.append(
                 {
+                    "origin_type": "augmented",
+                    "is_synthetic": False,
                     "job_id": res.job_id,
                     "result_id": res.id,
                     "original_image_id": res.original_image_id,
@@ -183,6 +296,47 @@ def _build_zip_export(
                     "height": res.height,
                     "file_size": res.file_size,
                     "generation_timestamp": res.created_at.isoformat(),
+                }
+            )
+
+        for gen in gen_list:
+            if not gen.output_filename or gen.status != "success":
+                continue
+            try:
+                file_path = resolve_safe_path(OUTPUT_DIR, gen.output_filename)
+            except ValueError:
+                continue
+            if not file_path.exists() or not file_path.is_file():
+                continue
+
+            safe_arc_name = f"images/{Path(gen.output_filename).name}"
+            zf.write(file_path, arcname=safe_arc_name)
+            added_files += 1
+
+            src_filename = (
+                gen.source_image.original_filename if gen.source_image else f"synthetic_{gen.species}"
+            )
+            manifest_items.append(
+                {
+                    "origin_type": "ai_generated",
+                    "is_synthetic": True,
+                    "job_id": gen.job_id,
+                    "generation_id": gen.id,
+                    "original_image_id": gen.source_image_id,
+                    "original_filename": src_filename,
+                    "generated_filename": gen.output_filename,
+                    "archive_path": safe_arc_name,
+                    "mode": gen.mode,
+                    "species": gen.species,
+                    "style": gen.style,
+                    "prompt": gen.prompt,
+                    "model": gen.model,
+                    "provider": gen.provider,
+                    "parameters": gen.parameters or {},
+                    "width": gen.width,
+                    "height": gen.height,
+                    "file_size": gen.file_size,
+                    "generation_timestamp": gen.created_at.isoformat(),
                 }
             )
 
@@ -627,32 +781,55 @@ def list_results(
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """List generated augmentation results with filtering, searching, sorting, and pagination."""
-    query = db.query(AugmentationResult).options(joinedload(AugmentationResult.original_image))
+    """List augmented and AI-generated results with filtering, search, sort, and pagination."""
+    tech_filter = technique.strip() if technique else ""
+    is_ai_only_filter = tech_filter in {"ai_generated", "sdxl_text_to_image", "sdxl_image_to_image"}
 
-    if technique and technique.strip() and technique != "all":
-        query = query.filter(AugmentationResult.technique.contains(technique.strip()))
+    aug_items: List[Dict[str, Any]] = []
+    if not is_ai_only_filter:
+        aug_query = db.query(AugmentationResult).options(joinedload(AugmentationResult.original_image))
+        if tech_filter and tech_filter != "all":
+            aug_query = aug_query.filter(AugmentationResult.technique.contains(tech_filter))
+        if original_id is not None:
+            aug_query = aug_query.filter(AugmentationResult.original_image_id == original_id)
+        if search and search.strip():
+            pattern = f"%{search.strip()}%"
+            aug_query = aug_query.join(AugmentationResult.original_image).filter(
+                AugmentationResult.output_filename.ilike(pattern)
+                | UploadedImage.original_filename.ilike(pattern)
+            )
+        aug_items = [_serialize_result(r) for r in aug_query.all()]
 
-    if original_id is not None:
-        query = query.filter(AugmentationResult.original_image_id == original_id)
-
-    if search and search.strip():
-        pattern = f"%{search.strip()}%"
-        query = query.join(AugmentationResult.original_image).filter(
-            AugmentationResult.output_filename.ilike(pattern)
-            | UploadedImage.original_filename.ilike(pattern)
+    gen_items: List[Dict[str, Any]] = []
+    if not tech_filter or tech_filter == "all" or is_ai_only_filter:
+        gen_query = (
+            db.query(GeneratedImage)
+            .options(joinedload(GeneratedImage.source_image))
+            .filter(GeneratedImage.status == "success")
         )
+        if tech_filter == "sdxl_text_to_image":
+            gen_query = gen_query.filter(GeneratedImage.mode == "text_to_image")
+        elif tech_filter == "sdxl_image_to_image":
+            gen_query = gen_query.filter(GeneratedImage.mode == "image_to_image")
+        if original_id is not None:
+            gen_query = gen_query.filter(GeneratedImage.source_image_id == original_id)
+        if search and search.strip():
+            pattern = f"%{search.strip()}%"
+            gen_query = gen_query.filter(
+                GeneratedImage.output_filename.ilike(pattern)
+                | GeneratedImage.prompt.ilike(pattern)
+                | GeneratedImage.species.ilike(pattern)
+            )
+        gen_items = [_serialize_generated_for_gallery(g) for g in gen_query.all()]
 
-    total = query.count()
+    combined = aug_items + gen_items
+    reverse_sort = sort != "oldest"
+    combined.sort(key=lambda item: (item["created_at"], item["id"]), reverse=reverse_sort)
 
-    if sort == "oldest":
-        query = query.order_by(asc(AugmentationResult.created_at), asc(AugmentationResult.id))
-    else:
-        query = query.order_by(desc(AugmentationResult.created_at), desc(AugmentationResult.id))
-
-    rows = query.offset(offset).limit(limit).all()
+    total = len(combined)
+    paged = combined[offset : offset + limit]
     return {
-        "items": [_serialize_result(r) for r in rows],
+        "items": paged,
         "total": total,
         "limit": limit,
         "offset": offset,
@@ -1403,30 +1580,49 @@ def export_zip_get(
     db: Session = Depends(get_db),
 ):
     """Export all, job-specific, or selected generated images as a ZIP archive."""
-    query = db.query(AugmentationResult).options(joinedload(AugmentationResult.original_image))
+    tech_filter = technique.strip() if technique else ""
+    is_ai_only = tech_filter in {"ai_generated", "sdxl_text_to_image", "sdxl_image_to_image"}
 
-    if job_id is not None:
-        query = query.filter(AugmentationResult.job_id == job_id)
-    if technique and technique.strip() and technique != "all":
-        query = query.filter(AugmentationResult.technique.contains(technique.strip()))
-    if result_ids and result_ids.strip():
-        try:
-            parsed_ids = [int(x.strip()) for x in result_ids.split(",") if x.strip()]
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="result_ids must be a comma-separated list of integers.",
-            ) from exc
-        if parsed_ids:
-            query = query.filter(AugmentationResult.id.in_(parsed_ids))
+    results: List[AugmentationResult] = []
+    if not is_ai_only:
+        query = db.query(AugmentationResult).options(joinedload(AugmentationResult.original_image))
+        if job_id is not None:
+            query = query.filter(AugmentationResult.job_id == job_id)
+        if tech_filter and tech_filter != "all":
+            query = query.filter(AugmentationResult.technique.contains(tech_filter))
+        if result_ids and result_ids.strip():
+            try:
+                parsed_ids = [int(x.strip()) for x in result_ids.split(",") if x.strip()]
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="result_ids must be a comma-separated list of integers.",
+                ) from exc
+            if parsed_ids:
+                query = query.filter(AugmentationResult.id.in_(parsed_ids))
+        results = query.order_by(asc(AugmentationResult.id)).all()
 
-    results = query.order_by(asc(AugmentationResult.id)).all()
+    generated_items: List[GeneratedImage] = []
+    if not (result_ids and result_ids.strip()) and (not tech_filter or tech_filter == "all" or is_ai_only):
+        gen_q = (
+            db.query(GeneratedImage)
+            .options(joinedload(GeneratedImage.source_image))
+            .filter(GeneratedImage.status == "success")
+        )
+        if job_id is not None:
+            gen_q = gen_q.filter(GeneratedImage.job_id == job_id)
+        if tech_filter == "sdxl_text_to_image":
+            gen_q = gen_q.filter(GeneratedImage.mode == "text_to_image")
+        elif tech_filter == "sdxl_image_to_image":
+            gen_q = gen_q.filter(GeneratedImage.mode == "image_to_image")
+        generated_items = gen_q.order_by(asc(GeneratedImage.id)).all()
+
     zip_name = (
         f"reefaugment_job_{job_id}.zip"
         if job_id is not None
         else "reefaugment_dataset_export.zip"
     )
-    return _build_zip_export(results, zip_name, background_tasks)
+    return _build_zip_export(results, zip_name, background_tasks, generated_items=generated_items)
 
 
 @router.post("/export/zip")
@@ -1435,17 +1631,569 @@ def export_zip_post(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
-    """Export selected generated images or a batch job as a ZIP archive."""
-    query = db.query(AugmentationResult).options(joinedload(AugmentationResult.original_image))
-    if payload.job_id is not None:
-        query = query.filter(AugmentationResult.job_id == payload.job_id)
-    if payload.result_ids:
-        query = query.filter(AugmentationResult.id.in_(payload.result_ids))
+    """Export selected augmented or AI-generated images as a ZIP archive."""
+    has_explicit_selection = bool(payload.result_ids) or bool(payload.generated_ids)
 
-    results = query.order_by(asc(AugmentationResult.id)).all()
+    results: List[AugmentationResult] = []
+    if not has_explicit_selection or payload.result_ids:
+        query = db.query(AugmentationResult).options(joinedload(AugmentationResult.original_image))
+        if payload.job_id is not None:
+            query = query.filter(AugmentationResult.job_id == payload.job_id)
+        if payload.result_ids:
+            query = query.filter(AugmentationResult.id.in_(payload.result_ids))
+        results = query.order_by(asc(AugmentationResult.id)).all()
+
+    generated_items: List[GeneratedImage] = []
+    if (not has_explicit_selection and payload.include_generated) or payload.generated_ids:
+        gen_q = (
+            db.query(GeneratedImage)
+            .options(joinedload(GeneratedImage.source_image))
+            .filter(GeneratedImage.status == "success")
+        )
+        if payload.job_id is not None:
+            gen_q = gen_q.filter(GeneratedImage.job_id == payload.job_id)
+        if payload.generated_ids:
+            gen_q = gen_q.filter(GeneratedImage.id.in_(payload.generated_ids))
+        generated_items = gen_q.order_by(asc(GeneratedImage.id)).all()
+
     zip_name = (
         f"reefaugment_job_{payload.job_id}.zip"
         if payload.job_id is not None
         else "reefaugment_selected_export.zip"
     )
-    return _build_zip_export(results, zip_name, background_tasks)
+    return _build_zip_export(results, zip_name, background_tasks, generated_items=generated_items)
+
+
+# ---------------------------------------------------------------------------
+# AI Image Generation Studio (Hosted SDXL) Endpoints
+# ---------------------------------------------------------------------------
+
+@router.get("/generation/status", response_model=GenerationStatusResponse)
+def get_generation_status():
+    """Report active hosted SDXL provider capabilities without exposing secrets."""
+    cfg = get_runtime_diffusion_settings()
+    return GenerationStatusResponse(
+        configured=cfg["configured"],
+        provider=cfg["provider"],
+        model=cfg["model"],
+        supports_text_to_image=cfg["supports_text_to_image"],
+        supports_image_to_image=cfg["supports_image_to_image"],
+        required_env_vars=cfg["required_env_vars"],
+        allowed_species=ALLOWED_SPECIES,
+        allowed_styles=ALLOWED_STYLES,
+        allowed_dimensions=[f"{w}x{h}" for w, h in ALLOWED_DIMENSIONS],
+        message=cfg["message"],
+    )
+
+
+@router.post("/generation/text-to-image", response_model=GenerationBatchResponse)
+def generate_text_to_image(
+    payload: TextToImageRequest,
+    db: Session = Depends(get_db),
+):
+    """Generate synthetic underwater species images from a text prompt using hosted SDXL."""
+    ensure_directories()
+
+    prompt_text = payload.prompt.strip()
+    if len(prompt_text) < 3:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Prompt must contain at least 3 characters.",
+        )
+
+    try:
+        validate_sdxl_dimensions(payload.width, payload.height)
+        final_prompt = build_underwater_prompt(
+            prompt_text,
+            species=payload.species,
+            style=payload.style,
+            mode="text_to_image",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    neg_prompt = (payload.negative_prompt or "").strip() or DEFAULT_NEGATIVE_PROMPT
+    cfg = get_runtime_diffusion_settings()
+
+    if not cfg["configured"]:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=cfg["message"])
+
+    job = ProcessingJob(
+        job_type="ai_text_to_image",
+        status="processing",
+        total_images=payload.num_images,
+        completed_images=0,
+        failed_images=0,
+        config_json={
+            "mode": "text_to_image",
+            "species": payload.species,
+            "style": payload.style,
+            "width": payload.width,
+            "height": payload.height,
+            "num_images": payload.num_images,
+            "steps": payload.steps,
+            "guidance_scale": payload.guidance_scale,
+            "seed": payload.seed,
+            "provider": cfg["provider"],
+            "model": cfg["model"],
+        },
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    try:
+        client = _get_sdxl_client()
+        generated_pngs, provider_meta = client.generate_text_to_image(
+            final_prompt=final_prompt,
+            negative_prompt=neg_prompt,
+            width=payload.width,
+            height=payload.height,
+            num_images=payload.num_images,
+            steps=payload.steps,
+            guidance_scale=payload.guidance_scale,
+            seed=payload.seed,
+        )
+    except GenerationProviderError as exc:
+        job.status = "failed"
+        job.failed_images = payload.num_images
+        job.completed_at = utc_now()
+        job.error_message = exc.message
+        failed_row = GeneratedImage(
+            job_id=job.id,
+            mode="text_to_image",
+            species=payload.species,
+            style=payload.style,
+            prompt=prompt_text,
+            final_prompt=final_prompt,
+            negative_prompt=neg_prompt,
+            provider=cfg["provider"],
+            model=cfg["model"],
+            parameters=job.config_json or {},
+            is_synthetic=True,
+            status="failed",
+            error_message=exc.message,
+        )
+        db.add(failed_row)
+        db.commit()
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+    saved_records: List[GeneratedImage] = []
+    species_slug = payload.species.lower().replace(" ", "_")
+    for idx, (png_bytes, out_w, out_h) in enumerate(generated_pngs):
+        out_filename = generate_unique_filename(
+            f"sdxl_{species_slug}_{idx + 1}.png",
+            prefix="gen_t2i",
+            ext_override=".png",
+        )
+        out_path = resolve_safe_path(OUTPUT_DIR, out_filename)
+        out_path.write_bytes(png_bytes)
+
+        rec = GeneratedImage(
+            job_id=job.id,
+            mode="text_to_image",
+            species=payload.species,
+            style=payload.style,
+            prompt=prompt_text,
+            final_prompt=final_prompt,
+            negative_prompt=neg_prompt,
+            provider=provider_meta["provider"],
+            model=provider_meta["model"],
+            parameters={
+                "width": out_w,
+                "height": out_h,
+                "steps": payload.steps,
+                "guidance_scale": payload.guidance_scale,
+                "seed": payload.seed,
+                "variation": idx + 1,
+            },
+            output_filename=out_filename,
+            output_path=f"outputs/{out_filename}",
+            width=out_w,
+            height=out_h,
+            file_size=len(png_bytes),
+            is_synthetic=True,
+            status="success",
+        )
+        db.add(rec)
+        saved_records.append(rec)
+
+    job.status = "completed"
+    job.completed_images = len(saved_records)
+    job.completed_at = utc_now()
+    db.commit()
+    for rec in saved_records:
+        db.refresh(rec)
+
+    return GenerationBatchResponse(
+        job_id=job.id,
+        mode="text_to_image",
+        provider=provider_meta["provider"],
+        model=provider_meta["model"],
+        is_synthetic=True,
+        disclaimer=SYNTHETIC_DISCLAIMER,
+        images=[_serialize_generated_image(r) for r in saved_records],
+    )
+
+
+@router.post("/generation/image-to-image", response_model=GenerationBatchResponse)
+async def generate_image_to_image(
+    file: Optional[UploadFile] = File(None),
+    image_id: Optional[int] = Form(None),
+    prompt: str = Form(""),
+    species: str = Form("Other"),
+    style: str = Form("Photorealistic"),
+    strength: float = Form(0.55),
+    num_images: int = Form(1),
+    steps: int = Form(30),
+    guidance_scale: float = Form(7.5),
+    negative_prompt: Optional[str] = Form(None),
+    seed: Optional[int] = Form(None),
+    db: Session = Depends(get_db),
+):
+    """Generate SDXL variations conditioned on a preserved underwater species image."""
+    ensure_directories()
+
+    if not (0.10 <= strength <= 0.95):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Image strength must be between 0.10 and 0.95.",
+        )
+    if not (1 <= num_images <= 4):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Number of variations must be between 1 and 4.",
+        )
+    if not (15 <= steps <= 50):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Inference steps must be between 15 and 50.",
+        )
+    if not (1.0 <= guidance_scale <= 15.0):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Guidance scale must be between 1.0 and 15.0.",
+        )
+
+    clean_prompt = (prompt or "").strip()
+    if len(clean_prompt) > 1000:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Modification prompt cannot exceed 1000 characters.",
+        )
+
+    try:
+        final_prompt = build_underwater_prompt(
+            clean_prompt,
+            species=species,
+            style=style,
+            mode="image_to_image",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    # Resolve or save preserved original source image
+    orig_record: Optional[UploadedImage] = None
+    if file is not None and file.filename:
+        try:
+            raw_bytes = await file.read()
+            safe_name, img_format, width, height, file_size = validate_uploaded_image_bytes(
+                raw_bytes, file.filename
+            )
+            ext = format_extension_for_pil(img_format)
+            stored_filename = generate_unique_filename(safe_name, prefix="orig", ext_override=ext)
+            dest_path = resolve_safe_path(UPLOAD_DIR, stored_filename)
+            dest_path.write_bytes(raw_bytes)
+            orig_record = UploadedImage(
+                original_filename=safe_name,
+                stored_filename=stored_filename,
+                file_path=f"uploads/{stored_filename}",
+                file_format=img_format,
+                file_size=file_size,
+                width=width,
+                height=height,
+            )
+            db.add(orig_record)
+            db.commit()
+            db.refresh(orig_record)
+        except ValueError as exc:
+            db.rollback()
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        finally:
+            await file.close()
+    elif image_id is not None:
+        orig_record = db.query(UploadedImage).filter(UploadedImage.id == image_id).first()
+        if not orig_record:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Selected source uploaded image was not found.",
+            )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Upload a source underwater image or select an existing uploaded image.",
+        )
+
+    src_path = resolve_safe_path(UPLOAD_DIR, orig_record.stored_filename)
+    if not src_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Original source image file is missing from storage.",
+        )
+
+    cfg = get_runtime_diffusion_settings()
+    if not cfg["configured"] or not cfg["supports_image_to_image"]:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=cfg["message"])
+
+    neg_prompt = (negative_prompt or "").strip() or DEFAULT_NEGATIVE_PROMPT
+    job = ProcessingJob(
+        job_type="ai_image_to_image",
+        status="processing",
+        total_images=num_images,
+        completed_images=0,
+        failed_images=0,
+        config_json={
+            "mode": "image_to_image",
+            "source_image_id": orig_record.id,
+            "species": species,
+            "style": style,
+            "strength": strength,
+            "num_images": num_images,
+            "steps": steps,
+            "guidance_scale": guidance_scale,
+            "seed": seed,
+            "provider": cfg["provider"],
+            "model": cfg["model"],
+        },
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    try:
+        client = _get_sdxl_client()
+        generated_pngs, provider_meta = client.generate_image_to_image(
+            source_path=src_path,
+            final_prompt=final_prompt,
+            negative_prompt=neg_prompt,
+            strength=strength,
+            num_images=num_images,
+            steps=steps,
+            guidance_scale=guidance_scale,
+            seed=seed,
+        )
+    except GenerationProviderError as exc:
+        job.status = "failed"
+        job.failed_images = num_images
+        job.completed_at = utc_now()
+        job.error_message = exc.message
+        failed_row = GeneratedImage(
+            job_id=job.id,
+            source_image_id=orig_record.id,
+            mode="image_to_image",
+            species=species,
+            style=style,
+            prompt=clean_prompt or f"(Variation of {orig_record.original_filename})",
+            final_prompt=final_prompt,
+            negative_prompt=neg_prompt,
+            provider=cfg["provider"],
+            model=cfg["model"],
+            parameters=job.config_json or {},
+            is_synthetic=True,
+            status="failed",
+            error_message=exc.message,
+        )
+        db.add(failed_row)
+        db.commit()
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+    saved_records: List[GeneratedImage] = []
+    for idx, (png_bytes, out_w, out_h) in enumerate(generated_pngs):
+        out_filename = generate_unique_filename(
+            orig_record.original_filename,
+            prefix=f"gen_i2i_v{idx + 1}",
+            ext_override=".png",
+        )
+        out_path = resolve_safe_path(OUTPUT_DIR, out_filename)
+        out_path.write_bytes(png_bytes)
+
+        rec = GeneratedImage(
+            job_id=job.id,
+            source_image_id=orig_record.id,
+            mode="image_to_image",
+            species=species,
+            style=style,
+            prompt=clean_prompt or f"Variation of {orig_record.original_filename}",
+            final_prompt=final_prompt,
+            negative_prompt=neg_prompt,
+            provider=provider_meta["provider"],
+            model=provider_meta["model"],
+            parameters={
+                "strength": strength,
+                "steps": steps,
+                "guidance_scale": guidance_scale,
+                "seed": seed,
+                "variation": idx + 1,
+            },
+            output_filename=out_filename,
+            output_path=f"outputs/{out_filename}",
+            width=out_w,
+            height=out_h,
+            file_size=len(png_bytes),
+            is_synthetic=True,
+            status="success",
+        )
+        db.add(rec)
+        saved_records.append(rec)
+
+    job.status = "completed"
+    job.completed_images = len(saved_records)
+    job.completed_at = utc_now()
+    db.commit()
+
+    refreshed_records = (
+        db.query(GeneratedImage)
+        .options(joinedload(GeneratedImage.source_image))
+        .filter(GeneratedImage.id.in_([r.id for r in saved_records]))
+        .order_by(asc(GeneratedImage.id))
+        .all()
+    )
+
+    return GenerationBatchResponse(
+        job_id=job.id,
+        mode="image_to_image",
+        provider=provider_meta["provider"],
+        model=provider_meta["model"],
+        is_synthetic=True,
+        disclaimer=SYNTHETIC_DISCLAIMER,
+        source_image=_serialize_uploaded_image(orig_record, 0),
+        images=[_serialize_generated_image(r) for r in refreshed_records],
+    )
+
+
+@router.get("/generation/history")
+def list_generation_history(
+    mode: Optional[str] = Query(None),
+    species: Optional[str] = Query(None),
+    status_filter: Optional[str] = Query(None, alias="status"),
+    search: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """List persisted SDXL generation records from SQLite."""
+    query = db.query(GeneratedImage).options(joinedload(GeneratedImage.source_image))
+
+    if mode and mode.strip() and mode != "all":
+        query = query.filter(GeneratedImage.mode == mode.strip())
+    if species and species.strip() and species != "all":
+        query = query.filter(GeneratedImage.species == species.strip())
+    if status_filter and status_filter.strip() and status_filter != "all":
+        query = query.filter(GeneratedImage.status == status_filter.strip())
+    if search and search.strip():
+        pattern = f"%{search.strip()}%"
+        query = query.filter(
+            GeneratedImage.prompt.ilike(pattern)
+            | GeneratedImage.species.ilike(pattern)
+            | GeneratedImage.output_filename.ilike(pattern)
+        )
+
+    total = query.count()
+    rows = (
+        query.order_by(desc(GeneratedImage.created_at), desc(GeneratedImage.id))
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    return {
+        "items": [_serialize_generated_image(r) for r in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@router.get("/generation/{gen_id}/download")
+def download_generated_image(gen_id: int, db: Session = Depends(get_db)):
+    """Download an AI-generated synthetic underwater image."""
+    gen = db.query(GeneratedImage).filter(GeneratedImage.id == gen_id).first()
+    if not gen or not gen.output_filename:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generated image not found.")
+    file_path = resolve_safe_path(OUTPUT_DIR, gen.output_filename)
+    if not file_path.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generated file missing from storage.")
+    return FileResponse(path=str(file_path), filename=gen.output_filename)
+
+
+@router.post("/generation/{gen_id}/send-to-augment", response_model=UploadedImageResponse)
+def send_generated_to_augment(gen_id: int, db: Session = Depends(get_db)):
+    """Register a synthetic AI-generated image as an input for the 15 augmentation techniques."""
+    ensure_directories()
+    gen = db.query(GeneratedImage).filter(GeneratedImage.id == gen_id).first()
+    if not gen or not gen.output_filename or gen.status != "success":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generated image not found.")
+
+    if gen.imported_image_id:
+        existing = db.query(UploadedImage).filter(UploadedImage.id == gen.imported_image_id).first()
+        if existing:
+            try:
+                existing_path = resolve_safe_path(UPLOAD_DIR, existing.stored_filename)
+                if existing_path.exists():
+                    aug_count = (
+                        db.query(func.count(AugmentationResult.id))
+                        .filter(AugmentationResult.original_image_id == existing.id)
+                        .scalar()
+                        or 0
+                    )
+                    return _serialize_uploaded_image(existing, aug_count)
+            except ValueError:
+                pass
+
+    src_path = resolve_safe_path(OUTPUT_DIR, gen.output_filename)
+    if not src_path.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generated file missing from disk.")
+
+    raw_bytes = src_path.read_bytes()
+    display_name = f"synthetic_{gen.species.lower().replace(' ', '_')}_{gen.id}.png"
+    stored_filename = generate_unique_filename(display_name, prefix="orig_syn", ext_override=".png")
+    dest_path = resolve_safe_path(UPLOAD_DIR, stored_filename)
+    dest_path.write_bytes(raw_bytes)
+
+    uploaded = UploadedImage(
+        original_filename=display_name,
+        stored_filename=stored_filename,
+        file_path=f"uploads/{stored_filename}",
+        file_format="PNG",
+        file_size=len(raw_bytes),
+        width=gen.width,
+        height=gen.height,
+    )
+    db.add(uploaded)
+    db.flush()
+    gen.imported_image_id = uploaded.id
+    db.commit()
+    db.refresh(uploaded)
+    return _serialize_uploaded_image(uploaded, 0)
+
+
+@router.delete("/generation/{gen_id}")
+def delete_generated_image(gen_id: int, db: Session = Depends(get_db)):
+    """Safely delete an AI-generated image without deleting any source uploaded images."""
+    gen = db.query(GeneratedImage).filter(GeneratedImage.id == gen_id).first()
+    if not gen:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Generated image not found.")
+
+    out_filename = gen.output_filename
+    db.delete(gen)
+    db.commit()
+
+    if out_filename:
+        try:
+            out_path = resolve_safe_path(OUTPUT_DIR, out_filename)
+            if out_path.exists() and out_path.is_file():
+                out_path.unlink()
+        except (ValueError, OSError):
+            pass
+
+    return {"status": "deleted", "deleted_generation_id": gen_id}
+
