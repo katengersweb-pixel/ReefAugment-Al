@@ -337,24 +337,29 @@ def test_image_to_image_replicate_preserves_source_and_safe_delete(isolated_gen_
 
 
 def test_cloudflare_free_provider_t2i_and_i2i(isolated_gen_env, monkeypatch):
+    import base64
+
     client, upload_dir, output_dir = isolated_gen_env
     monkeypatch.setenv("DIFFUSION_PROVIDER", "cloudflare")
     monkeypatch.setenv("DIFFUSION_API_KEY", "cf_dummy_token")
     monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "acc_12345")
+    # Retired SDXL model ID should transparently resolve to active flux-2-klein-4b
+    monkeypatch.setenv("DIFFUSION_MODEL", "@cf/stabilityai/stable-diffusion-xl-base-1.0")
 
     st = client.get("/api/generation/status").json()
     assert st["configured"] is True
+    assert st["model"] == "@cf/black-forest-labs/flux-2-klein-4b"
     assert st["supports_text_to_image"] is True
     assert st["supports_image_to_image"] is True
     assert "CLOUDFLARE_ACCOUNT_ID" in st["required_env_vars"]
 
     cf_png = _png_bytes(1024, 1024, (12, 110, 165))
+    cf_b64 = base64.b64encode(cf_png).decode("ascii")
 
     def cf_handler(request):
-        assert "/accounts/acc_12345/ai/run/@cf/stabilityai/stable-diffusion-xl-base-1.0" in str(request.url)
-        body = json.loads(request.content.decode("utf-8"))
-        assert body["num_steps"] <= 20
-        return httpx.Response(200, content=cf_png, headers={"content-type": "image/png"})
+        assert "/accounts/acc_12345/ai/run/@cf/black-forest-labs/flux-2-klein-4b" in str(request.url)
+        assert "multipart/form-data" in (request.headers.get("content-type") or "").lower()
+        return httpx.Response(200, json={"success": True, "result": {"image": cf_b64}, "errors": []})
 
     transport = httpx.MockTransport(cf_handler)
     monkeypatch.setattr(routes, "_get_sdxl_client", lambda: generation.HostedSDXLClient(transport=transport))
@@ -373,6 +378,7 @@ def test_cloudflare_free_provider_t2i_and_i2i(isolated_gen_env, monkeypatch):
     )
     assert t2i.status_code == 200, t2i.text
     assert t2i.json()["provider"] == "cloudflare"
+    assert t2i.json()["model"] == "@cf/black-forest-labs/flux-2-klein-4b"
 
     i2i = client.post(
         "/api/generation/image-to-image",

@@ -1,3 +1,4 @@
+
 # ReefAugment AI
 
 **ReefAugment AI** is a local, full-stack underwater species image augmentation and dataset management platform designed for marine biologists, researchers, students, and computer vision engineers.
@@ -222,13 +223,13 @@ Create `backend/.env` (copy from `backend/.env.example`) and configure your prov
 | `DIFFUSION_PROVIDER` | Yes | `cloudflare` | Free-tier: `cloudflare`, `aihorde`; Paid/credits: `replicate`, `stability`, `huggingface`, `custom` |
 | `DIFFUSION_API_KEY` | Yes | *(your provider token)* | Secret API key/token for the selected provider |
 | `CLOUDFLARE_ACCOUNT_ID` | If `cloudflare` | *(your CF Account ID)* | Required when using Cloudflare Workers AI free tier |
-| `DIFFUSION_MODEL` | Optional | `@cf/stabilityai/stable-diffusion-xl-base-1.0` | SDXL model identifier (`AlbedoBase XL (SDXL)` for AI Horde, `stability-ai/sdxl` for Replicate, `stable-diffusion-xl-1024-v1-0` for Stability) |
+| `DIFFUSION_MODEL` | Optional | `@cf/black-forest-labs/flux-2-klein-4b` | Image generation model ID (`@cf/black-forest-labs/flux-2-klein-4b` or `flux-2-klein-9b` for Cloudflare, `AlbedoBase XL (SDXL)` for AI Horde, `stability-ai/sdxl` for Replicate, `stable-diffusion-xl-1024-v1-0` for Stability) |
 | `DIFFUSION_TIMEOUT_SECONDS` | Optional | `120` | Request timeout in seconds |
 | `DIFFUSION_API_BASE_URL` | Optional | *(empty)* | Custom endpoint URL (required when `DIFFUSION_PROVIDER=custom`) |
 | `DIFFUSION_IMG2IMG_URL` | Optional | *(empty)* | Dedicated endpoint URL for Image-to-Image (needed on `huggingface` if not using `cloudflare`, `aihorde`, `replicate`, or `stability`) |
 
 **Provider Capability Notes:**
-- **`cloudflare` (Free Tier — No Credit Card):** 10,000 free Neurons/day via Cloudflare Workers AI (`@cf/stabilityai/stable-diffusion-xl-base-1.0`); supports **both** Text-to-Image and Image-to-Image. Requires `CLOUDFLARE_ACCOUNT_ID` + `DIFFUSION_API_KEY`.
+- **`cloudflare` (Free Tier — No Credit Card):** 10,000 free Neurons/day via Cloudflare Workers AI (`@cf/black-forest-labs/flux-2-klein-4b`); supports **both** Text-to-Image and Image-to-Image via `multipart/form-data`. Requires `CLOUDFLARE_ACCOUNT_ID` + `DIFFUSION_API_KEY`. *(Retired Cloudflare SDXL model IDs are automatically routed to `@cf/black-forest-labs/flux-2-klein-4b`.)*
 - **`aihorde` (Free Community Cluster — No Credit Card):** Crowdsourced SDXL GPUs (`https://stablehorde.net`); supports **both** Text-to-Image and Image-to-Image. Register a free API key at `stablehorde.net/register` (or test at lower resolution with anonymous `0000000000`).
 - **`huggingface`**: Text-to-Image via `router.huggingface.co/hf-inference/models/...` (Inference Providers credits required for most models; Image-to-Image needs `DIFFUSION_IMG2IMG_URL`).
 - **`replicate` / `stability`**: Paid/credit-based hosted SDXL supporting **both** Text-to-Image and Image-to-Image natively.

@@ -66,11 +66,21 @@ class GenerationProviderError(Exception):
         self.status_code = status_code
 
 
+DEPRECATED_CLOUDFLARE_MODELS = {
+    "@cf/stabilityai/stable-diffusion-xl-base-1.0",
+    "@cf/bytedance/stable-diffusion-xl-lightning",
+    "@cf/lykon/dreamshaper-8-lcm",
+    "@cf/runwayml/stable-diffusion-v1-5-img2img",
+    "@cf/runwayml/stable-diffusion-v1-5-inpainting",
+}
+DEFAULT_CLOUDFLARE_MODEL = "@cf/black-forest-labs/flux-2-klein-4b"
+
+
 def get_runtime_diffusion_settings() -> Dict[str, Any]:
     """Read active diffusion settings dynamically from env/config without leaking secrets."""
     provider = (os.getenv("DIFFUSION_PROVIDER") or config.DIFFUSION_PROVIDER or "huggingface").strip().lower()
     default_model_map = {
-        "cloudflare": "@cf/stabilityai/stable-diffusion-xl-base-1.0",
+        "cloudflare": DEFAULT_CLOUDFLARE_MODEL,
         "aihorde": "AlbedoBase XL (SDXL)",
         "huggingface": "stabilityai/stable-diffusion-xl-base-1.0",
         "replicate": "stability-ai/sdxl",
@@ -84,6 +94,9 @@ def get_runtime_diffusion_settings() -> Dict[str, Any]:
         model = config.DIFFUSION_MODEL
     else:
         model = default_model_map.get(provider, "stabilityai/stable-diffusion-xl-base-1.0")
+
+    if provider == "cloudflare" and model in DEPRECATED_CLOUDFLARE_MODELS:
+        model = DEFAULT_CLOUDFLARE_MODEL
 
     api_key = config.get_diffusion_api_key(provider)
     cloudflare_account_id = (
@@ -215,6 +228,11 @@ def _raise_for_provider_http_error(resp: httpx.Response, provider: str) -> None:
             or payload.get("message")
             or ""
         )
+        if not detail and isinstance(payload.get("errors"), list) and payload["errors"]:
+            detail = "; ".join(
+                str(item.get("message") if isinstance(item, dict) else item)
+                for item in payload["errors"]
+            )
         if isinstance(detail, list):
             detail = "; ".join(str(x) for x in detail)
     except Exception:
@@ -751,34 +769,74 @@ class HostedSDXLClient:
         url = cfg["base_url"] or (
             f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model}"
         )
-        headers = {
-            "Authorization": f"Bearer {cfg['api_key']}",
-            "Content-Type": "application/json",
-        }
-        # Cloudflare Workers AI SDXL caps num_steps at 20
-        cf_steps = max(1, min(20, int(steps)))
+        headers = {"Authorization": f"Bearer {cfg['api_key']}"}
+        is_flux2 = "flux-2" in model.lower()
+        is_flux1_schnell = "flux-1-schnell" in model.lower()
         base_seed = seed if seed is not None else int(time.time()) % 1_000_000
 
         outputs: List[Tuple[bytes, int, int]] = []
         for idx in range(num_images):
-            payload: Dict[str, Any] = {
-                "prompt": prompt,
-                "negative_prompt": negative_prompt,
-                "width": width,
-                "height": height,
-                "num_steps": cf_steps,
-                "guidance": guidance_scale,
-                "seed": base_seed + idx,
-            }
-            if init_b64 is not None:
-                payload["image_b64"] = init_b64
-                if strength is not None:
-                    payload["strength"] = strength
+            if is_flux2:
+                # FLUX.2 Klein/Dev models on Cloudflare Workers AI require multipart/form-data
+                prompt_text = (
+                    f"{prompt}. Avoid: {negative_prompt}" if negative_prompt else prompt
+                )
+                multipart_fields: List[Tuple[str, Tuple[Optional[str], Any, Optional[str]]]] = [
+                    ("prompt", (None, prompt_text, None)),
+                    ("width", (None, str(width), None)),
+                    ("height", (None, str(height), None)),
+                ]
+                if init_b64 is not None:
+                    img_raw = base64.b64decode(init_b64)
+                    multipart_fields.append(("image", ("source.png", img_raw, "image/png")))
+                resp = client.post(url, headers=headers, files=multipart_fields)
+            elif is_flux1_schnell:
+                payload = {
+                    "prompt": prompt,
+                    "steps": max(1, min(8, int(steps))),
+                    "seed": base_seed + idx,
+                }
+                resp = client.post(
+                    url,
+                    headers={**headers, "Content-Type": "application/json"},
+                    json=payload,
+                )
+            else:
+                cf_steps = max(1, min(20, int(steps)))
+                payload = {
+                    "prompt": prompt,
+                    "negative_prompt": negative_prompt,
+                    "width": width,
+                    "height": height,
+                    "num_steps": cf_steps,
+                    "guidance": guidance_scale,
+                    "seed": base_seed + idx,
+                }
+                if init_b64 is not None:
+                    payload["image_b64"] = init_b64
+                    if strength is not None:
+                        payload["strength"] = strength
+                resp = client.post(
+                    url,
+                    headers={**headers, "Content-Type": "application/json"},
+                    json=payload,
+                )
 
-            resp = client.post(url, headers=headers, json=payload)
             if resp.status_code != 200:
                 _raise_for_provider_http_error(resp, "cloudflare")
-            outputs.append(_validate_image_bytes_to_png(resp.content))
+
+            content_type = (resp.headers.get("content-type") or "").lower()
+            if content_type.startswith("image/"):
+                outputs.append(_validate_image_bytes_to_png(resp.content))
+            else:
+                data = resp.json()
+                b64_img = (data.get("result") or {}).get("image")
+                if not b64_img:
+                    raise GenerationProviderError(
+                        "Cloudflare Workers AI returned a response without image data.",
+                        status_code=502,
+                    )
+                outputs.append(_validate_image_bytes_to_png(base64.b64decode(b64_img)))
         return outputs
 
     def _aihorde_generate(
